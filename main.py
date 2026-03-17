@@ -8,10 +8,9 @@ from fastapi.responses import HTMLResponse
 from openai import OpenAI
 from dotenv import load_dotenv
 
-# Load Environment Variables
 load_dotenv()
 
-app = FastAPI(title="Resume Reality Checker Pro")
+app = FastAPI(title="Resume Sight Pro")
 
 app.add_middleware(
     CORSMiddleware,
@@ -20,14 +19,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Groq Client
 client = OpenAI(
     api_key=os.getenv("GROQ_API_KEY"),
     base_url="https://api.groq.com/openai/v1"
 )
 MODEL_NAME = "llama-3.1-8b-instant" 
 
-# --- HELPER FUNCTIONS ---
 def extract_text(pdf_bytes: bytes) -> str:
     text = ""
     try:
@@ -44,166 +41,79 @@ def clean_text(text: str):
     return text.replace("\x00", "").strip()
 
 def safe_json_parse(content: str):
+    """Ensures the UI never sees 'undefined' by providing defaults for every key."""
     try:
-        return json.loads(content)
-    except:
-        return {
+        data = json.loads(content)
+        # Ensure every key exists
+        defaults = {
             "total_score": 0,
-            "summary": "AI parsing failed. The resume format might be too complex or empty.",
-            "section_scores": {
-                "skills": 0,
-                "projects": 0,
-                "formatting": 0,
-                "ats_keywords": 0
-            },
+            "summary": "Analysis complete.",
+            "section_scores": {"skills": 0, "projects": 0, "formatting": 0, "ats_keywords": 0},
+            "health_check": {"has_email": False, "has_phone": False, "has_linkedin": False, "has_github": False, "metrics_count": 0},
+            "action_verbs": [],
+            "weak_words": [],
             "strengths": [],
-            "weaknesses": ["AI response parsing failed. Try a simpler PDF layout."],
+            "weaknesses": [],
             "missing_keywords": [],
-            "ats_issues": [],
-            "improvement_suggestions": [],
+            "priority_fixes": [],
             "rewrite_examples": []
         }
-
-def normalize_scores(data):
-    try:
-        total = sum(data.get("section_scores", {}).values())
-        data["total_score"] = min(total, 100)
+        for key, val in defaults.items():
+            if key not in data:
+                data[key] = val
+        return data
     except:
-        data["total_score"] = 0
-    return data
+        return defaults
 
-# --- API ENDPOINT ---
 @app.post("/api/analyze")
-async def analyze_resume(file: UploadFile = File(...), role: str = Form(...)):
-    
+async def analyze_resume(file: UploadFile = File(...), role: str = Form(...), jd: str = Form(default="")):
     if not file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+        raise HTTPException(status_code=400, detail="Only PDF supported.")
 
     file_bytes = await file.read()
-    resume_text = extract_text(file_bytes)
-    resume_text = clean_text(resume_text)
+    resume_text = clean_text(extract_text(file_bytes))
 
     if len(resume_text) < 50:
         raise HTTPException(status_code=400, detail="Empty or unreadable resume.")
 
+    target = f"Job Description:\n{jd}" if jd.strip() else f"General Role: {role}"
+
     prompt = f"""
-You are an Applicant Tracking System (ATS) and Senior Technical Recruiter at a top-tier product company.
+    You are a professional ATS and Senior Recruiter. 
+    Evaluate this resume against: {target}
+    
+    Return ONLY a JSON object with this exact structure:
+    {{
+      "total_score": 85,
+      "summary": "Professional 2-sentence summary.",
+      "section_scores": {{"skills": 25, "projects": 20, "formatting": 15, "ats_keywords": 25}},
+      "health_check": {{
+        "has_email": true, "has_phone": true, "has_linkedin": true, "has_github": true, "metrics_count": 5
+      }},
+      "action_verbs": ["Architected", "Optimized"],
+      "weak_words": ["Worked on", "Helped"],
+      "strengths": ["Strong tech stack"],
+      "weaknesses": ["Lacks metrics"],
+      "missing_keywords": ["Docker", "Kubernetes"],
+      "priority_fixes": [{{"priority": "High", "task": "Add metrics"}}],
+      "rewrite_examples": ["Old bullet → New bullet with metrics"]
+    }}
 
-Your job is to STRICTLY evaluate the resume for the role: {role}.
-
-----------------------------------------
-EVALUATION CRITERIA (STRICT SCORING)
-----------------------------------------
-
-1. Skills Match (30 points)
-- Relevant technologies for {role}
-- Depth vs shallow listing
-- Industry-standard tools
-
-2. Projects Quality (25 points)
-- Real-world complexity
-- Use of modern tech stack
-- Measurable impact (%, scale, performance)
-- Problem-solving depth
-
-3. Formatting & Structure (15 points)
-- Clean sections (Education, Skills, Projects, Experience)
-- Bullet clarity
-- Readability (ATS-friendly, no tables/graphics)
-
-4. ATS Keyword Optimization (30 points)
-- Presence of role-specific keywords
-- Alignment with job descriptions
-- Avoid keyword stuffing
-
-----------------------------------------
-STRICT RULES
-----------------------------------------
-
-- Be critical and realistic (no inflated scores)
-- Penalize generic resumes heavily
-- Penalize missing metrics
-- Penalize irrelevant skills for {role}
-- Do NOT give vague feedback
-- All feedback must be actionable
-
-----------------------------------------
-ATS BEST PRACTICES CHECK
-----------------------------------------
-
-Check if resume follows:
-- 1 page (or max 2 pages)
-- Uses bullet points
-- Uses action verbs (Developed, Built, Optimized)
-- Contains measurable results (%, x improvement)
-- Avoids paragraphs
-- No images, icons, or fancy formatting
-- Includes GitHub/portfolio (if technical role)
-
-----------------------------------------
-OUTPUT FORMAT (STRICT JSON ONLY)
-----------------------------------------
-
-Return ONLY valid JSON. No markdown. No explanation.
-
-{{
-  "total_score": 85,
-  "summary": "2-3 line professional evaluation",
-  "section_scores": {{
-    "skills": 25,
-    "projects": 20,
-    "formatting": 15,
-    "ats_keywords": 25
-  }},
-  "strengths": [
-    "Clear, strong technical strength"
-  ],
-  "weaknesses": [
-    "Specific critical issue"
-  ],
-  "missing_keywords": [
-    "Docker", "Kubernetes", "System Design"
-  ],
-  "ats_issues": [
-    "Uses paragraphs instead of bullet points",
-    "Missing measurable achievements"
-  ],
-  "improvement_suggestions": [
-    "Rewrite project bullet: 'Improved API response time by 35% using caching'",
-    "Add role-specific tools like AWS, Docker"
-  ],
-  "rewrite_examples": [
-    "Built a web app → Developed a scalable web application handling 10,000+ users"
-  ]
-}}
-
-----------------------------------------
-RESUME
-----------------------------------------
-
-{resume_text[:4000]}
-"""
+    RESUME TEXT:
+    {resume_text[:4000]}
+    """
 
     try:
         response = client.chat.completions.create(
             model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": "You are a strict JSON generator. Output ONLY valid JSON."},
-                {"role": "user", "content": prompt}
-            ],
+            messages=[{"role": "system", "content": "You are a JSON-only API."}, {"role": "user", "content": prompt}],
             response_format={"type": "json_object"}
         )
-
-        raw_content = response.choices[0].message.content.strip()
-        raw_content = raw_content.replace("```json", "").replace("```", "").strip()
-
-        parsed = safe_json_parse(raw_content)
-        parsed = normalize_scores(parsed)
-
+        parsed = safe_json_parse(response.choices[0].message.content)
+        parsed["raw_text"] = resume_text
         return parsed
-
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"API Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
